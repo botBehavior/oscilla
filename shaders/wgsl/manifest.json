@@ -1,0 +1,12 @@
+[
+  {
+    "source_path": "wgsl/oscilla_shaders.spv",
+    "entry_point": "synth_audio_cs",
+    "wgsl_entry_point": "synth_audio_cs"
+  },
+  {
+    "source_path": "wgsl/oscilla_shaders.spv",
+    "entry_point": "synth_visual_cs",
+    "wgsl_entry_point": "synth_visual_cs"
+  }
+]
