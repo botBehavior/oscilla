@@ -6,3 +6,4 @@ out-*.wav
 out-*.png
 /drafts/
 /web/kernels.version
+/web/audio.wasm

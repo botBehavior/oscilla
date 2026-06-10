@@ -99,35 +99,53 @@
 </div>
 
 <script>
+// The synth LIVES in the worklet: Rust compiled to WASM, rendering each
+// 128-sample quantum directly into the audio thread. No ring, no readback,
+// no transport — nothing between the math and the speaker.
 const WORKLET = `
-class OscillaSink extends AudioWorkletProcessor {
-  constructor() {
+class OscillaSynth extends AudioWorkletProcessor {
+  constructor(options) {
     super();
-    this.ring = new Float32Array(16384);
-    this.read = 0; this.write = 0; this.underruns = 0;
+    this.ready = false; this.cursor = 0; this.tick = 0; this.rec = null;
+    this.boot(options.processorOptions.wasmBytes);
     this.port.onmessage = (e) => {
-      const block = e.data;
-      for (let i = 0; i < block.length; i++) {
-        this.ring[this.write % this.ring.length] = block[i];
-        this.write++;
-      }
+      const m = e.data;
+      if (m.t === "wasm") { this.boot(m.bytes); return; }
+      if (!this.ready) return;
+      if (m.t === "p") this.w.set_param(m.i, m.v);
+      else if (m.t === "on") this.w.note_on(m.slot, m.f, this.cursor);
+      else if (m.t === "off") this.w.note_off(m.slot, this.cursor);
+      else if (m.t === "rec") this.rec = { left: m.n, chunks: [] };
     };
+  }
+  boot(bytes) {
+    WebAssembly.instantiate(bytes, {}).then(({ instance }) => {
+      this.w = instance.exports; this.ready = true;
+      this.port.postMessage({ t: "ready" });
+    });
   }
   process(inputs, outputs) {
     const out = outputs[0][0];
-    for (let i = 0; i < out.length; i++) {
-      if (this.read < this.write) {
-        out[i] = this.ring[this.read % this.ring.length];
-        this.read++;
-      } else { out[i] = 0; this.underruns++; }
+    if (!this.ready) { out.fill(0); return true; }
+    const ptr = this.w.render(this.cursor);
+    const block = new Float32Array(this.w.memory.buffer, ptr, 128);
+    out.set(block.subarray(0, out.length));
+    this.cursor += 128;
+    if (this.rec) {
+      this.rec.chunks.push(block.slice());
+      if (--this.rec.left <= 0) {
+        this.port.postMessage({ t: "recdone", chunks: this.rec.chunks });
+        this.rec = null;
+      }
     }
-    if (currentFrame % 12800 < 128) {
-      this.port.postMessage({ buffered: this.write - this.read, underruns: this.underruns });
+    if ((this.tick++ & 3) === 0) {
+      const f = new Float32Array(this.w.memory.buffer, this.w.features(), 4);
+      this.port.postMessage({ t: "viz", wave: block.slice(), feats: f.slice() });
     }
     return true;
   }
 }
-registerProcessor("oscilla-sink", OscillaSink);
+registerProcessor("oscilla-synth", OscillaSynth);
 `;
 </script>
 <script type="module">
@@ -147,8 +165,17 @@ const PARAMS = [
 ];
 const target = {}, cur = {};
 PARAMS.forEach(([n,,,d]) => { target[n] = d; cur[n] = d; });
-function smooth() { PARAMS.forEach(([n]) => cur[n] += (target[n] - cur[n]) * 0.18); }
-const patchF32 = () => new Float32Array([...PARAMS.map(([n]) => cur[n]), 0, 0, 0]);
+// smoothing runs on the main thread; smoothed values stream to the worklet
+function smooth() {
+  PARAMS.forEach(([n], i) => {
+    const next = cur[n] + (target[n] - cur[n]) * 0.18;
+    if (Math.abs(next - cur[n]) > 1e-6) {
+      cur[n] = next;
+      worklet?.port.postMessage({ t: "p", i, v: next });
+    }
+  });
+}
+setInterval(smooth, 10);
 
 // drawer sliders bound to targets
 const sliders = document.getElementById("sliders");
@@ -203,22 +230,22 @@ xy.addEventListener("pointermove", (e) => xyDrag && xyHandle(e));
 xy.addEventListener("pointerup", () => xyDrag = false);
 
 // ---------- voices ----------
-const voices = Array.from({ length: VOICES }, () => ({ freq: 0, on: 0, off: 0, active: 0 }));
-let sampleCursor = 0;
+// voice slots are allocated here; gate timestamps happen IN the worklet at
+// its own cursor (sample-accurate by construction)
+const slotBusy = new Array(VOICES).fill(false);
 let octave = 0;
 function noteOnFreq(freq) {
-  let slot = voices.findIndex(v => !v.active);
+  let slot = slotBusy.findIndex(b => !b);
   if (slot < 0) slot = 0;
-  voices[slot] = { freq, on: sampleCursor, off: 0xFFFFFFFF, active: 1 };
+  slotBusy[slot] = true;
+  worklet?.port.postMessage({ t: "on", slot, f: freq });
   return slot;
 }
+function slotOff(slot) {
+  slotBusy[slot] = false;
+  worklet?.port.postMessage({ t: "off", slot });
+}
 const semiFreq = (semi) => 261.63 * Math.pow(2, (semi + 12 * octave) / 12);
-const voicesF32 = () => {
-  const buf = new ArrayBuffer(VOICES * 16);
-  const f = new Float32Array(buf), u = new Uint32Array(buf);
-  voices.forEach((v, i) => { f[i*4] = v.freq; u[i*4+1] = v.on; u[i*4+2] = v.off; u[i*4+3] = v.active; });
-  return buf;
-};
 
 // ---------- on-screen piano + computer keys ----------
 const piano = document.getElementById("piano");
@@ -239,7 +266,7 @@ function pressNote(id, semi) {
 }
 function releaseNote(id, semi) {
   const slot = heldSlots[id];
-  if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldSlots[id]; }
+  if (slot !== undefined) { slotOff(slot); delete heldSlots[id]; }
   keyEls[semi]?.classList.remove("on");
 }
 NOTES.forEach(({ semi, key }, wi) => {
@@ -293,7 +320,7 @@ if (navigator.requestMIDIAccess) {
           heldSlots["m" + note] = noteOnFreq(440 * Math.pow(2, (note - 69) / 12));
         } else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
           const slot = heldSlots["m" + note];
-          if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldSlots["m" + note]; }
+          if (slot !== undefined) { slotOff(slot); delete heldSlots["m" + note]; }
         }
       };
     }
@@ -306,7 +333,7 @@ let G = null;
 async function initGpu() {
   if (G) return G;
   if (!navigator.gpu) throw new Error("WebGPU not available");
-  const code = await (await fetch("./kernels.wgsl")).text();
+  const code = await (await fetch("./kernels.wgsl", { cache: "no-store" })).text();
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("no WebGPU adapter");
   const device = await adapter.requestDevice();
@@ -357,6 +384,11 @@ async function pollHotSwap() {
           G.vBindAB = G.mkVBind(visual, G.vOutA, G.vOutB);
           G.vBindBA = G.mkVBind(visual, G.vOutB, G.vOutA);
           G.audio = audio; G.visual = visual;
+          // swap the audio engine too — same edit, new sound, ring never stops
+          try {
+            const bytes = await (await fetch("./audio.wasm", { cache: "no-store" })).arrayBuffer();
+            worklet?.port.postMessage({ t: "wasm", bytes });
+          } catch (e) {}
           const latency = Date.now() - stamp;
           status.textContent = `⚡ hot-swapped — edit→sound ${latency} ms`;
           if (isAuto) beacon(`SWAP edit-to-sound ${latency}ms`);
@@ -367,54 +399,21 @@ async function pollHotSwap() {
   }
 }
 
-// ---------- audio rendering ----------
-let filterState = 0;
+// ---------- audio state mirrored from the worklet (for visuals) ----------
 let lastBlock = new Float32Array(BLOCK);
-let renderUs = 0;
-let recording = null;
-
-async function renderBlock() {
-  const g = G;
-  smooth();
-  const pbuf = new ArrayBuffer(64);
-  new Float32Array(pbuf, 0, 12).set(patchF32());
-  const u = new Uint32Array(pbuf, 48, 4);
-  u[0] = sampleCursor; u[1] = VOICES;
-  new Float32Array(pbuf, 56, 1)[0] = filterState;
-  g.device.queue.writeBuffer(g.aParams, 0, pbuf);
-  g.device.queue.writeBuffer(g.vBuf, 0, voicesF32());
-  const t0 = performance.now();
-  const enc = g.device.createCommandEncoder();
-  const pass = enc.beginComputePass();
-  pass.setPipeline(g.audio); pass.setBindGroup(0, g.aBind); pass.dispatchWorkgroups(1); pass.end();
-  enc.copyBufferToBuffer(g.aOut, 0, g.aStage, 0, (BLOCK + 1) * 4);
-  g.device.queue.submit([enc.finish()]);
-  await g.aStage.mapAsync(GPUMapMode.READ);
-  const data = new Float32Array(g.aStage.getMappedRange()).slice();
-  g.aStage.unmap();
-  renderUs = renderUs * 0.9 + (performance.now() - t0) * 1000 * 0.1;
-  filterState = data[BLOCK];
-  lastBlock = data.subarray(0, BLOCK);
-  sampleCursor += BLOCK;
-  if (recording) {
-    recording.chunks.push(data.slice(0, BLOCK));
-    recording.remaining -= BLOCK;
-    if (recording.remaining <= 0) finishRecording();
-  }
-  return data.slice(0, BLOCK);
-}
+let feats = new Float32Array(4); // bass, mid, high, level
 
 // ---------- WAV export (tucked in the drawer) ----------
 document.getElementById("record").onclick = (e) => {
   if (!running) { status.textContent = "power on first"; return; }
-  recording = { chunks: [], remaining: 5 * SR };
+  worklet.port.postMessage({ t: "rec", n: Math.ceil(5 * SR / BLOCK) });
   e.target.textContent = "recording…";
 };
-function finishRecording() {
-  const total = recording.chunks.reduce((a, c) => a + c.length, 0);
+function finishRecording(chunks) {
+  const total = chunks.reduce((a, c) => a + c.length, 0);
   const pcm = new Int16Array(total);
   let o = 0;
-  for (const c of recording.chunks) for (const v of c) pcm[o++] = Math.max(-1, Math.min(1, v)) * 32767;
+  for (const c of chunks) for (const v of c) pcm[o++] = Math.max(-1, Math.min(1, v)) * 32767;
   const hdr = new ArrayBuffer(44);
   const dv = new DataView(hdr);
   dv.setUint32(0, 0x46464952, true); dv.setUint32(4, 36 + pcm.byteLength, true);
@@ -427,7 +426,6 @@ function finishRecording() {
   a.href = URL.createObjectURL(new Blob([hdr, pcm.buffer], { type: "audio/wav" }));
   a.download = "oscilla.wav";
   a.click();
-  recording = null;
   document.getElementById("record").textContent = "record 5s WAV";
 }
 
@@ -460,56 +458,44 @@ async function drawFrame(level, waveOverride) {
 }
 
 // ---------- power + loops ----------
-// Buffered-sample accounting is CLIENT-side and exact: sent counter minus
-// consumption derived from the AudioContext clock. (v1 trusted a stale
-// worklet report and overfilled the ring, lapping the read pointer — that
-// was the "horrible distortion".)
-let running = false, worklet = null, underruns = 0;
-let AC = null, audioT0 = 0, sentSamples = 0;
+let running = false, worklet = null;
 document.getElementById("power-overlay").onclick = async () => {
   if (running) return;
   try {
     await initGpu();
-    AC = new AudioContext({ sampleRate: SR });
+    const wasmBytes = await (await fetch("./audio.wasm", { cache: "no-store" })).arrayBuffer();
+    const AC = new AudioContext({ sampleRate: SR });
     await AC.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
-    worklet = new AudioWorkletNode(AC, "oscilla-sink");
-    worklet.port.onmessage = (e) => { underruns = e.data.underruns; };
+    worklet = new AudioWorkletNode(AC, "oscilla-synth", { processorOptions: { wasmBytes } });
+    worklet.port.onmessage = (e) => {
+      const m = e.data;
+      if (m.t === "viz") { lastBlock = m.wave; feats = m.feats; }
+      else if (m.t === "recdone") finishRecording(m.chunks);
+      else if (m.t === "ready") status.textContent = "live — Rust in your audio thread";
+    };
     worklet.connect(AC.destination);
-    audioT0 = AC.currentTime;
     running = true;
     document.getElementById("power-overlay").remove();
-    pump();
+    // push the full patch once the engine is up
+    PARAMS.forEach(([n], i) => worklet.port.postMessage({ t: "p", i, v: cur[n] }));
     visLoop();
+    statusLoop();
   } catch (e) { status.textContent = "error: " + e.message; console.error(e); }
 };
 
-const TARGET_BUFFER = 4096;  // ~85 ms latency
-const RING_CAP = 12288;      // hard cap well under the 16384 ring — never lap the reader
-async function pump() {
-  while (running) {
-    const consumed = Math.max(0, (AC.currentTime - audioT0) * SR);
-    let buffered = sentSamples - consumed;
-    let guard = 0;
-    while (buffered < TARGET_BUFFER && buffered < RING_CAP && guard < 24) {
-      const block = await renderBlock();
-      worklet.port.postMessage(block, [block.buffer]);
-      sentSamples += BLOCK;
-      buffered += BLOCK;
-      guard++;
-    }
-    const budget = (BLOCK / SR) * 1e6;
+function statusLoop() {
+  setInterval(() => {
+    if (!running) return;
+    const held = Object.keys(heldSlots).length;
     status.textContent =
-      `${renderUs.toFixed(0)}µs/block (budget ${budget.toFixed(0)}) · buf ${Math.round(buffered)} · ` +
-      `${voices.filter(v=>v.active).length} voices · ${underruns} underruns · oct ${octave >= 0 ? "+" : ""}${octave}`;
-    await new Promise(r => setTimeout(r, 8));
-  }
+      `level ${feats[3].toFixed(2)} · bass ${feats[0].toFixed(2)} mid ${feats[1].toFixed(2)} high ${feats[2].toFixed(2)} · ` +
+      `${held} held · oct ${octave >= 0 ? "+" : ""}${octave}`;
+  }, 250);
 }
 
 async function visLoop() {
   while (running) {
-    let rms = 0;
-    for (let i = 0; i < BLOCK; i++) rms += lastBlock[i] * lastBlock[i];
-    await drawFrame(Math.sqrt(rms / BLOCK) * 3);
+    await drawFrame(Math.min(1, feats[3] * 3));
     await new Promise(requestAnimationFrame);
   }
 }
@@ -519,13 +505,20 @@ if (isAuto) {
   (async () => {
     try {
       await initGpu();
-      voices[0] = { freq: 220, on: 0, off: 0xFFFFFFFF, active: 1 };
-      voices[1] = { freq: 330, on: 256, off: 0xFFFFFFFF, active: 1 };
+      // headless audio check: run the SAME wasm engine the worklet uses,
+      // on the main thread (identical binary, identical exports)
+      const bytes = await (await fetch("./audio.wasm")).arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes, {});
+      const w = instance.exports;
+      w.note_on(0, 220, 0);
+      w.note_on(1, 330, 256);
       let peak = 0, sum = 0, n = 0;
       const t0 = performance.now();
       for (let b = 0; b < 20; b++) {
-        const block = await renderBlock();
+        const ptr = w.render(b * BLOCK);
+        const block = new Float32Array(w.memory.buffer, ptr, BLOCK);
         for (const v of block) { peak = Math.max(peak, Math.abs(v)); sum += v * v; n++; }
+        if (b === 19) lastBlock = block.slice();
       }
       const ms = (performance.now() - t0) / 20;
       const brightness = () => {
