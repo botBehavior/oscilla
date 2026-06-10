@@ -1,11 +1,11 @@
-//! oscilla synth kernels — pure functions, CPU-tested, GPU-compiled.
+//! oscilla synth kernels - pure functions, CPU-tested, GPU-compiled.
 //! std on CPU (tests), no_std on SPIR-V. House rules: no recursion, no
 //! checked math, bounded loops, u32/f32 data, stateless where possible.
 //!
 //! Architecture: the ADSR is CLOSED-FORM from gate-on/gate-off sample stamps
 //! (no envelope state machine), so any sample can be computed independently.
 //! Only the one-pole filter is stateful; `render_block` carries its state
-//! through a serial loop — on GPU that maps to one thread per voice-block,
+//! through a serial loop - on GPU that maps to one thread per voice-block,
 //! serial inside, parallel across voices and blocks.
 #![cfg_attr(target_arch = "spirv", no_std)]
 
@@ -153,23 +153,27 @@ pub fn soft_clip(x: f32) -> f32 {
     x / (1.0 + x.abs())
 }
 
-/// Render BLOCK samples starting at `block_start`, mixing `voices`, carrying
-/// the filter state in/out. CPU oracle and GPU kernel share this exact code.
+/// Render BLOCK samples starting at `block_start`, mixing the first
+/// `n_voices` of `voices`, carrying the filter state in/out. CPU oracle and
+/// GPU kernel share this exact code. (Takes count instead of a subslice:
+/// slicing a slice is pointer arithmetic, illegal on logical SPIR-V.)
 pub fn render_block(
     p: &Patch,
     voices: &[Voice],
+    n_voices: u32,
     block_start: u32,
     filter_state_in: f32,
-    out: &mut [f32],
+    out: &mut [f32; BLOCK as usize], // fixed array: unsizing coercion doesn't lower to SPIR-V
 ) -> f32 {
     let a = onepole_coeff(p.cutoff_hz);
     let mut state = filter_state_in;
+    let n = (n_voices as usize).min(voices.len());
     let mut i = 0u32;
     while i < BLOCK {
         let s = block_start + i;
         let mut mix = 0.0f32;
         let mut vi = 0usize;
-        while vi < voices.len() {
+        while vi < n {
             mix += voice_sample(p, &voices[vi], s);
             vi += 1;
         }
@@ -281,8 +285,8 @@ mod tests {
         ];
         let mut block_a = [0.0f32; BLOCK as usize];
         let mut block_b = [0.0f32; BLOCK as usize];
-        let s1 = render_block(&p, &voices, 0, 0.0, &mut block_a);
-        let _ = render_block(&p, &voices, BLOCK, s1, &mut block_b);
+        let s1 = render_block(&p, &voices, 3, 0, 0.0, &mut block_a);
+        let _ = render_block(&p, &voices, 3, BLOCK, s1, &mut block_b);
         for v in block_a.iter().chain(block_b.iter()) {
             assert!(v.abs() <= 1.0, "soft-clipped mix must stay in [-1,1]");
         }
@@ -304,8 +308,8 @@ mod tests {
         let v = [Voice { freq_hz: 440.0, gate_on_sample: 0, gate_off_sample: u32::MAX, active: 1 }];
         let mut a = [0.0f32; BLOCK as usize];
         let mut b = [0.0f32; BLOCK as usize];
-        render_block(&p, &v, 512, 0.1, &mut a);
-        render_block(&p, &v, 512, 0.1, &mut b);
+        render_block(&p, &v, 1, 512, 0.1, &mut a);
+        render_block(&p, &v, 1, 512, 0.1, &mut b);
         assert_eq!(a, b);
     }
 }

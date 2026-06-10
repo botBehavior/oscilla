@@ -1,0 +1,10 @@
+[package]
+name = "oscilla-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oscilla-synth = { path = "../synth" }
+wgpu = { version = "29", features = ["spirv"] }
+pollster = "0.4"
+bytemuck = "1"
