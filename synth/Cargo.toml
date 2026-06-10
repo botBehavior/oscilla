@@ -1,0 +1,14 @@
+[package]
+name = "oscilla-synth"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust synth kernels: CPU-tested, GPU-compiled"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[target.'cfg(target_arch = "spirv")'.dependencies]
+spirv-std = "=0.10.0-alpha.1"
+
+[target.'cfg(not(target_arch = "spirv"))'.dependencies]
