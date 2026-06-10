@@ -31,6 +31,12 @@
   <span id="status">off — click power (browsers require a gesture for audio)</span>
 </div>
 <div class="row" id="sliders"></div>
+<div class="row">
+  <button id="vismode">visual: scope</button>
+  <button id="record">record 5s WAV</button>
+  <button id="share">copy patch URL</button>
+  <span id="midi" style="font-size:11px;color:#778">midi: probing…</span>
+</div>
 <canvas id="canvas" width="480" height="270"></canvas>
 
 <script>
@@ -93,18 +99,97 @@ const patchF32 = () => new Float32Array([
   ...PARAMS.map(([n]) => patchEls[n]()), 0, 0, 0, // 9 params + 3 pad = Patch(12 f32)
 ]);
 
+// ---------- shareable patch URLs (state in the fragment) ----------
+function loadPatchFromHash() {
+  if (!location.hash.startsWith("#p=")) return;
+  const vals = location.hash.slice(3).split(",").map(Number);
+  PARAMS.forEach(([n], i) => {
+    if (Number.isFinite(vals[i])) document.getElementById(`p_${n}`).value = vals[i];
+  });
+}
+loadPatchFromHash();
+sliders.addEventListener("input", () => {
+  history.replaceState(null, "", "#p=" + PARAMS.map(([n]) => patchEls[n]().toFixed(3)).join(","));
+});
+document.getElementById("share").onclick = () => {
+  navigator.clipboard?.writeText(location.href);
+  document.getElementById("share").textContent = "copied!";
+  setTimeout(() => document.getElementById("share").textContent = "copy patch URL", 1200);
+};
+
+// ---------- visual mode toggle ----------
+let visMode = 0;
+document.getElementById("vismode").onclick = () => {
+  visMode = 1 - visMode;
+  document.getElementById("vismode").textContent = "visual: " + (visMode ? "spectrum" : "scope");
+};
+
+// ---------- WebMIDI ----------
+if (navigator.requestMIDIAccess) {
+  navigator.requestMIDIAccess().then((midi) => {
+    let n = 0;
+    const heldMidi = {};
+    for (const input of midi.inputs.values()) {
+      n++;
+      input.onmidimessage = (e) => {
+        const [st, note, vel] = e.data;
+        const cmd = st & 0xF0;
+        if (cmd === 0x90 && vel > 0) heldMidi[note] = noteOnFreq(440 * Math.pow(2, (note - 69) / 12));
+        else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
+          const slot = heldMidi[note];
+          if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldMidi[note]; }
+        }
+      };
+    }
+    document.getElementById("midi").textContent = n ? `midi: ${n} input(s) connected` : "midi: no devices";
+  }).catch(() => document.getElementById("midi").textContent = "midi: unavailable");
+} else {
+  document.getElementById("midi").textContent = "midi: unsupported";
+}
+
+// ---------- WAV export ----------
+let recording = null;
+document.getElementById("record").onclick = () => {
+  if (!running) { status.textContent = "power on first"; return; }
+  recording = { chunks: [], remaining: 5 * SR };
+  document.getElementById("record").textContent = "recording…";
+};
+function finishRecording() {
+  const total = recording.chunks.reduce((a, c) => a + c.length, 0);
+  const pcm = new Int16Array(total);
+  let o = 0;
+  for (const c of recording.chunks) for (const v of c) pcm[o++] = Math.max(-1, Math.min(1, v)) * 32767;
+  const hdr = new ArrayBuffer(44);
+  const dv = new DataView(hdr);
+  const su32 = (off, v) => dv.setUint32(off, v, true);
+  const su16 = (off, v) => dv.setUint16(off, v, true);
+  su32(0, 0x46464952); su32(4, 36 + pcm.byteLength); su32(8, 0x45564157);
+  su32(12, 0x20746d66); su32(16, 16); su16(20, 1); su16(22, 1);
+  su32(24, SR); su32(28, SR * 2); su16(32, 2); su16(34, 16);
+  su32(36, 0x61746164); su32(40, pcm.byteLength);
+  const blob = new Blob([hdr, pcm.buffer], { type: "audio/wav" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "oscilla.wav";
+  a.click();
+  recording = null;
+  document.getElementById("record").textContent = "record 5s WAV";
+}
+
 // ---------- voices (gate stamps in absolute samples) ----------
 const voices = Array.from({ length: VOICES }, () => ({ freq: 0, on: 0, off: 0, active: 0 }));
 let sampleCursor = 0; // next sample to be rendered
 let octave = 0;
 const KEYMAP = { z:0, s:1, x:2, d:3, c:4, v:5, g:6, b:7, h:8, n:9, j:10, m:11, q:12 };
 const held = {};
-function noteOn(semi) {
-  const freq = 261.63 * Math.pow(2, (semi + 12 * octave) / 12);
+function noteOnFreq(freq) {
   let slot = voices.findIndex(v => !v.active);
   if (slot < 0) slot = 0; // steal
   voices[slot] = { freq, on: sampleCursor, off: 0xFFFFFFFF, active: 1 };
   return slot;
+}
+function noteOn(semi) {
+  return noteOnFreq(261.63 * Math.pow(2, (semi + 12 * octave) / 12));
 }
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;
@@ -214,6 +299,11 @@ async function renderBlock() {
   filterState = data[BLOCK];
   lastBlock = data.subarray(0, BLOCK);
   sampleCursor += BLOCK;
+  if (recording) {
+    recording.chunks.push(data.slice(0, BLOCK));
+    recording.remaining -= BLOCK;
+    if (recording.remaining <= 0) finishRecording();
+  }
   return data.slice(0, BLOCK);
 }
 
@@ -221,7 +311,7 @@ async function renderBlock() {
 const img = ctx2d.createImageData(VIS_W, VIS_H);
 async function drawFrame(level) {
   const g = G;
-  g.device.queue.writeBuffer(g.vParams, 0, new Uint32Array([VIS_W, VIS_H, Math.min(999, level * 1000) | 0, 0]));
+  g.device.queue.writeBuffer(g.vParams, 0, new Uint32Array([VIS_W, VIS_H, Math.min(999, level * 1000) | 0, visMode]));
   g.device.queue.writeBuffer(g.wave, 0, lastBlock.slice().buffer);
   const enc = g.device.createCommandEncoder();
   const pass = enc.beginComputePass();
@@ -308,7 +398,11 @@ if (isAuto) {
       const rms = Math.sqrt(sum / n);
       await drawFrame(0.7);
       const d = ctx2d.getImageData(240, 135, 1, 1).data;
-      await beacon(`SYNTH blocks 20, ${ms.toFixed(2)} ms/block, rms ${rms.toFixed(3)}, peak ${peak.toFixed(3)}, vispx ${d[0]},${d[1]},${d[2]}`);
+      visMode = 1;
+      await drawFrame(0.7);
+      const s = ctx2d.getImageData(60, 240, 1, 1).data; // low-freq bar region
+      visMode = 0;
+      await beacon(`SYNTH blocks 20, ${ms.toFixed(2)} ms/block, rms ${rms.toFixed(3)}, peak ${peak.toFixed(3)}, vispx ${d[0]},${d[1]},${d[2]}, spectrumpx ${s[0]},${s[1]},${s[2]}`);
     } catch (e) { await beacon("SYNTH-ERROR " + e.message); }
     await beacon("SYNTH-DONE");
   })();

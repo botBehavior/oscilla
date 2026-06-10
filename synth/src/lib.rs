@@ -184,6 +184,30 @@ pub fn render_block(
     state
 }
 
+// ---------- spectrum (Goertzel per bin — no FFT needed at BLOCK=128) ----------
+
+/// Magnitude of frequency bin `bin` of `n_bins` (log-spaced 80 Hz..8 kHz)
+/// over one block. Pure + bounded: ideal GPU per-column work.
+pub fn spectrum_bin(wave: &[f32; BLOCK as usize], bin: u32, n_bins: u32) -> f32 {
+    let f_lo = 80.0f32;
+    let f_hi = 8_000.0f32;
+    let t = bin as f32 / (n_bins.max(2) - 1) as f32;
+    let freq = f_lo * (f_hi / f_lo).powf(t);
+    let w = TAU * freq / SAMPLE_RATE;
+    let coeff = 2.0 * w.cos();
+    let mut s_prev = 0.0f32;
+    let mut s_prev2 = 0.0f32;
+    let mut i = 0usize;
+    while i < BLOCK as usize {
+        let s = wave[i] + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+        i += 1;
+    }
+    let power = s_prev * s_prev + s_prev2 * s_prev2 - coeff * s_prev * s_prev2;
+    (power.max(0.0)).sqrt() * (2.0 / BLOCK as f32)
+}
+
 // ---------- visual kernel (placeholder: level -> color ramp) ----------
 
 /// Day-zero visual: maps (uv.y vs recent waveform, level) to a color.
@@ -299,6 +323,28 @@ mod tests {
         assert!(
             boundary_step <= max_step * 2.0 + 1e-4,
             "block boundary discontinuity: {boundary_step} vs max in-block {max_step}"
+        );
+    }
+
+    #[test]
+    fn spectrum_peaks_at_the_right_bin() {
+        // 1 kHz sine: find which log-spaced bin (of 32) holds the peak
+        let mut wave = [0.0f32; BLOCK as usize];
+        for (i, w) in wave.iter_mut().enumerate() {
+            *w = sine(1000.0, i as u32);
+        }
+        let mags: Vec<f32> = (0..32).map(|b| spectrum_bin(&wave, b, 32)).collect();
+        let peak_bin = mags
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        // expected bin: log position of 1 kHz in 80..8000 over 32 bins ≈ 17
+        let expect = ((1000.0f32 / 80.0).ln() / (8000.0f32 / 80.0).ln() * 31.0).round() as usize;
+        assert!(
+            (peak_bin as i32 - expect as i32).abs() <= 1,
+            "peak at bin {peak_bin}, expected ~{expect}"
         );
     }
 
