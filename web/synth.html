@@ -68,6 +68,8 @@ registerProcessor("oscilla-sink", OscillaSink);
 </script>
 <script type="module">
 const BLOCK = 128, SR = 48000, VOICES = 8;
+const isAuto = new URLSearchParams(location.search).has("auto");
+const beacon = (m) => fetch("/AUTO/" + encodeURIComponent(m)).catch(() => {});
 const VIS_W = 480, VIS_H = 270;
 const canvas = document.getElementById("canvas");
 const ctx2d = canvas.getContext("2d");
@@ -148,7 +150,42 @@ async function initGpu() {
   const vBind = device.createBindGroup({ layout: visual.getBindGroupLayout(0),
     entries: [{binding:0,resource:{buffer:vParams}},{binding:1,resource:{buffer:wave}},{binding:2,resource:{buffer:vOut}}] });
   G = { device, audio, visual, aParams, vBuf, aOut, aStage, aBind, vParams, wave, vOut, vStage, vBind };
+  pollHotSwap();
   return G;
+}
+
+// ---------- live-coding hot swap: poll the version stamp, rebuild pipelines,
+// swap between blocks; the audio ring keeps playing throughout ----------
+let kernelVersion = null;
+async function pollHotSwap() {
+  for (;;) {
+    try {
+      const r = await fetch("./kernels.version", { cache: "no-store" });
+      if (r.ok) {
+        const txt = (await r.text()).trim();
+        if (kernelVersion === null) {
+          kernelVersion = txt;
+        } else if (txt !== kernelVersion) {
+          kernelVersion = txt;
+          const stamp = +txt.split(/\s+/)[1];
+          const code = await (await fetch("./kernels.wgsl", { cache: "no-store" })).text();
+          const module = G.device.createShaderModule({ code });
+          const mk = (entryPoint) => G.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
+          const audio = mk("synth_audio_cs"), visual = mk("synth_visual_cs");
+          // new layouts => new bind groups; swap everything atomically
+          G.aBind = G.device.createBindGroup({ layout: audio.getBindGroupLayout(0),
+            entries: [{binding:0,resource:{buffer:G.aParams}},{binding:1,resource:{buffer:G.vBuf}},{binding:2,resource:{buffer:G.aOut}}] });
+          G.vBind = G.device.createBindGroup({ layout: visual.getBindGroupLayout(0),
+            entries: [{binding:0,resource:{buffer:G.vParams}},{binding:1,resource:{buffer:G.wave}},{binding:2,resource:{buffer:G.vOut}}] });
+          G.audio = audio; G.visual = visual;
+          const latency = Date.now() - stamp;
+          status.textContent = `⚡ hot-swapped kernels — edit→sound ${latency} ms`;
+          if (isAuto) beacon(`SWAP edit-to-sound ${latency}ms`);
+        }
+      }
+    } catch (e) { /* version file may not exist yet; fine */ }
+    await new Promise(r => setTimeout(r, 700));
+  }
 }
 
 let filterState = 0;
@@ -254,8 +291,7 @@ async function visLoop() {
 }
 
 // ---------- headless verification (?auto): compute path only, no audio ----------
-if (new URLSearchParams(location.search).has("auto")) {
-  const beacon = (m) => fetch("/AUTO/" + encodeURIComponent(m)).catch(() => {});
+if (isAuto) {
   (async () => {
     try {
       await initGpu();
