@@ -159,9 +159,9 @@ const status = document.getElementById("status");
 
 // ---------- patch: targets + smoothed currents (zipper-free) ----------
 const PARAMS = [
-  ["osc_mix", 0, 1, 0.25], ["fm_ratio", 0.5, 8, 2.0], ["fm_depth", 0, 6, 1.2],
-  ["cutoff_hz", 200, 12000, 3500], ["attack_s", 0.005, 1, 0.01], ["decay_s", 0.01, 1, 0.15],
-  ["sustain", 0, 1, 0.6], ["release_s", 0.01, 2, 0.25], ["gain", 0, 1, 0.4],
+  ["osc_mix", 0, 1, 0.12], ["fm_ratio", 0.5, 8, 2.0], ["fm_depth", 0, 6, 1.0],
+  ["cutoff_hz", 200, 12000, 3200], ["attack_s", 0.005, 1, 0.012], ["decay_s", 0.01, 1, 0.18],
+  ["sustain", 0, 1, 0.65], ["release_s", 0.01, 2, 0.35], ["gain", 0, 1, 0.38],
 ];
 const target = {}, cur = {};
 PARAMS.forEach(([n,,,d]) => { target[n] = d; cur[n] = d; });

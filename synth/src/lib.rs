@@ -83,6 +83,25 @@ pub fn fm(freq_hz: f32, ratio: f32, depth: f32, sample_index: u32) -> f32 {
     (TAU * freq_hz * t + depth * modulator).sin()
 }
 
+/// Phase-domain voice (the realtime path): both phases are kept wrapped to
+/// [0, TAU) by the caller's accumulator, so the sine argument never grows
+/// large and never loses precision — the cure for FM "chaotic crackling".
+/// `carrier_phase` doubles as the saw ramp.
+pub fn osc_at_phase(p: &Patch, carrier_phase: f32, mod_phase: f32, depth: f32) -> f32 {
+    let modulator = mod_phase.sin();
+    let fm = (carrier_phase + depth * modulator).sin();
+    let saw = carrier_phase / core::f32::consts::PI - 1.0; // [0,TAU) -> [-1,1)
+    fm * (1.0 - p.osc_mix) + saw * p.osc_mix
+}
+
+/// Wrap a positive-advancing phase back into [0, TAU).
+pub fn wrap_phase(mut ph: f32) -> f32 {
+    while ph >= TAU {
+        ph -= TAU;
+    }
+    ph
+}
+
 // ---------- envelope (closed-form ADSR) ----------
 
 /// Amplitude at absolute `sample` for a gate opened at `on` and closed at
@@ -299,6 +318,29 @@ mod tests {
         assert!((219..=221).contains(&zero_crossings(|i| saw(220.0, i))));
         // FM with zero depth degenerates to a pure carrier
         assert!((329..=331).contains(&zero_crossings(|i| fm(330.0, 2.0, 0.0, i))));
+    }
+
+    #[test]
+    fn phase_osc_stays_clean_at_any_phase() {
+        // the whole point: bounded phase => bounded output, forever
+        let p = Patch::default_patch();
+        let mut ph = 0.0f32;
+        let mut mph = 0.0f32;
+        let inc = TAU * 880.0 / SAMPLE_RATE; // a high note
+        let minc = inc * 2.0;
+        let mut prev = osc_at_phase(&p, ph, mph, 1.5);
+        // advance a simulated 10 minutes of samples; output must stay bounded
+        // and continuous (no precision blowup because phases wrap)
+        for _ in 0..(SAMPLE_RATE as u32 * 600) {
+            ph = wrap_phase(ph + inc);
+            mph = wrap_phase(mph + minc);
+            let s = osc_at_phase(&p, ph, mph, 1.5);
+            assert!(s.is_finite() && s.abs() <= 1.0);
+            // < 0.9 separates the saw's legit once-per-cycle edge (~0.5 at this
+            // mix) from precision blowup (near-random ⇒ jumps approach 2.0)
+            assert!((s - prev).abs() < 0.9, "precision blowup: jump {}", (s - prev).abs());
+            prev = s;
+        }
     }
 
     #[test]
