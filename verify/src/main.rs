@@ -73,25 +73,27 @@ fn main() {
 
     // ---- visual: pixel sanity vs CPU ----
     let (w, h) = (320u32, 180u32);
-    let vis_pipe = pipeline(&device, &module, "synth_visual_cs", &[false, false, true]);
+    let vis_pipe = pipeline(&device, &module, "synth_visual_cs", &[false, false, false, true]);
     let vparams = storage(&device, &queue, bytemuck::cast_slice(&[w, h, 700u32, 3200u32]));
     let wave: Vec<f32> = (0..BLOCK).map(|i| (i as f32 / 20.0).sin() * 0.8).collect();
     let wave_arr: [f32; BLOCK as usize] = wave.clone().try_into().unwrap();
     let wave_buf = storage(&device, &queue, bytemuck::cast_slice(&wave));
+    let prev_buf = storage(&device, &queue, &vec![0u8; (w * h * 3 * 4) as usize]); // zeros => no feedback term
     let vout = storage(&device, &queue, &vec![0u8; (w * h * 3 * 4) as usize]);
     let raw = dispatch_read(
         &device, &queue, &vis_pipe,
-        &[&vparams, &wave_buf, &vout],
+        &[&vparams, &wave_buf, &prev_buf, &vout],
         (w.div_ceil(8), h.div_ceil(8), 1), &vout,
     );
     let px: &[f32] = bytemuck::cast_slice(&raw);
     let mut vworst = 0.0f32;
+    let aspect = w as f32 / h as f32;
     for (x, y) in [(0u32, 0u32), (160, 90), (319, 179), (80, 40)] {
         let uv = glam::vec2(
-            x as f32 / w as f32 * 2.0 - 1.0,
+            (x as f32 / w as f32 * 2.0 - 1.0) * aspect,
             1.0 - y as f32 / h as f32 * 2.0,
         );
-        let expect = oscilla_synth::visual_v2(uv, &wave_arr, 3.2, 0.7);
+        let expect = oscilla_synth::visual_v3(uv, &wave_arr, glam::Vec3::ZERO, 3.2, 0.7);
         let base = ((y * w + x) * 3) as usize;
         for (k, e) in [expect.x, expect.y, expect.z].into_iter().enumerate() {
             vworst = vworst.max((px[base + k] - e).abs());

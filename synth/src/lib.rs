@@ -213,34 +213,63 @@ pub fn spectrum_bin(wave: &[f32; BLOCK as usize], bin: u32, n_bins: u32) -> f32 
 use glam::{vec2, vec3, Vec2, Vec3};
 use gpu_shader_lib::{color, noise};
 
-/// The face of the instrument. Domain-warped FBM colored by an IQ palette,
-/// where bass swells the warp, mids tighten the field, highs spin the hue,
-/// the waveform burns through as a glowing line, and level drives bloom.
-/// Time-animated even in silence — the screen is never dead.
-pub fn visual_v2(uv: Vec2, wave: &[f32; BLOCK as usize], t: f32, level: f32) -> Vec3 {
-    let bass = spectrum_bin(wave, 5, 32);
-    let mid = spectrum_bin(wave, 16, 32);
-    let high = spectrum_bin(wave, 26, 32);
+/// Where should this pixel's feedback come from? A slow zoom-in + rotation
+/// (bass widens the zoom, mids speed the spin) — re-sampling the previous
+/// frame through this transform is what turns motion into hypnotic trails.
+pub fn feedback_uv(uv: Vec2, bass: f32, mid: f32) -> Vec2 {
+    let zoom = 0.982 - bass * 0.015;
+    let ang = 0.004 + mid * 0.01;
+    let (s, c) = (ang.sin(), ang.cos());
+    vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c) * zoom
+}
 
-    let warp = vec2(
-        noise::fbm2(uv * 2.0 + vec2(t * 0.05, -t * 0.04), 4, 11),
-        noise::fbm2(uv * 2.0 + vec2(-t * 0.03, t * 0.06) + vec2(3.7, 1.9), 4, 12),
+pub fn audio_features(wave: &[f32; BLOCK as usize]) -> (f32, f32, f32) {
+    (
+        spectrum_bin(wave, 5, 32),
+        spectrum_bin(wave, 16, 32),
+        spectrum_bin(wave, 26, 32),
+    )
+}
+
+/// The face of the instrument, v3: a circular oscilloscope ring whose radius
+/// is the waveform, floating in a palette nebula that breathes with the bass,
+/// all dissolving into feedback trails (`prev` = last frame sampled through
+/// `feedback_uv`). Alive at silence; eruptive when played.
+pub fn visual_v3(
+    uv: Vec2,
+    wave: &[f32; BLOCK as usize],
+    prev: Vec3,
+    t: f32,
+    level: f32,
+) -> Vec3 {
+    let (bass, mid, high) = audio_features(wave);
+    let r = uv.length();
+    let theta = uv.y.atan2(uv.x);
+
+    // nebula field, polar-swirled
+    let swirl = vec2(
+        r * (theta + t * 0.07 + mid * 1.5).cos(),
+        r * (theta + t * 0.07 + mid * 1.5).sin(),
     );
-    let n = noise::fbm2(
-        uv * (2.2 + mid * 3.0) + warp * (0.8 + bass * 5.0) + vec2(t * 0.08, 0.0),
-        5,
-        7,
-    );
-    let base = color::palette_rainbow(n * 0.6 + t * 0.02 + high * 0.8);
-    let mut col = base * (0.12 + 0.5 * level + bass * 0.8);
+    let n = noise::fbm2(swirl * (1.6 + mid * 2.0) + vec2(t * 0.06, -t * 0.045), 5, 7);
+    let base = color::palette_rainbow(n * 0.5 + theta * 0.10 + t * 0.025 + high * 1.2);
+    let edge_fade = (1.15 - r).clamp(0.0, 1.0);
+    let mut col = base * (0.05 + 0.40 * level + bass * 0.9) * edge_fade;
 
-    // waveform burns through the field
-    let wi = ((uv.x * 0.5 + 0.5).clamp(0.0, 0.999) * (BLOCK - 1) as f32) as usize;
-    let d = (uv.y - wave[wi] * 0.7).abs();
-    col += vec3(0.9, 1.0, 0.95) * (-40.0 * d).exp() * (0.35 + level);
-    col += base * (-5.0 * d).exp() * level * 0.6;
+    // circular oscilloscope: waveform bends the ring's radius
+    let frac = (theta / TAU + 0.5).clamp(0.0, 0.999);
+    let wi = (frac * (BLOCK - 1) as f32) as usize;
+    let ring_r = 0.45 + wave[wi] * 0.22 + bass * 0.06;
+    let ring = (-55.0 * (r - ring_r).abs()).exp();
+    col += vec3(0.95, 1.0, 0.92) * ring * (0.35 + level * 1.2);
+    col += base * (-7.0 * (r - ring_r).abs()).exp() * (0.2 + level);
 
-    color::srgb_encode(color::tonemap_aces(col))
+    // treble flare from the core
+    col += color::palette_rainbow(t * 0.05 + 0.6) * high * (-4.5 * r).exp() * 1.5;
+
+    // feedback trails: previous frame decays in, bass holds the echo longer
+    let fed = col + prev * (0.60 + bass * 0.12).min(0.80);
+    color::srgb_encode(color::tonemap_aces(fed))
 }
 
 #[cfg(test)]
@@ -347,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_v2_finite_and_reactive() {
+    fn visual_v3_finite_reactive_and_trailing() {
         let mut loud = [0.0f32; BLOCK as usize];
         for (i, w) in loud.iter_mut().enumerate() {
             *w = sine(220.0, i as u32) * 0.8;
@@ -355,10 +384,10 @@ mod tests {
         let silent = [0.0f32; BLOCK as usize];
         let mut sum_loud = 0.0f32;
         let mut sum_silent = 0.0f32;
-        for (x, y) in [(-0.7, -0.4), (0.0, 0.0), (0.5, 0.3), (0.9, -0.8)] {
+        for (x, y) in [(-0.7, -0.4), (0.1, 0.05), (0.5, 0.3), (0.45, -0.1)] {
             let uv = vec2(x, y);
-            let cl = visual_v2(uv, &loud, 3.2, 0.7);
-            let cs = visual_v2(uv, &silent, 3.2, 0.0);
+            let cl = visual_v3(uv, &loud, Vec3::ZERO, 3.2, 0.7);
+            let cs = visual_v3(uv, &silent, Vec3::ZERO, 3.2, 0.0);
             for c in [cl, cs] {
                 for ch in [c.x, c.y, c.z] {
                     assert!(ch.is_finite() && (0.0..=1.0 + 1e-4).contains(&ch), "bad {ch}");
@@ -371,6 +400,16 @@ mod tests {
             sum_loud > sum_silent * 1.3,
             "playing must be visibly brighter: {sum_loud} vs {sum_silent}"
         );
+        // feedback: a bright previous pixel must leave a visible echo
+        let uv = vec2(0.3, 0.2);
+        let with_prev = visual_v3(uv, &silent, vec3(0.8, 0.8, 0.8), 3.2, 0.0);
+        let without = visual_v3(uv, &silent, Vec3::ZERO, 3.2, 0.0);
+        assert!(
+            (with_prev.x + with_prev.y + with_prev.z) > (without.x + without.y + without.z) + 0.3,
+            "trails must persist"
+        );
+        // feedback transform contracts (zoom < 1) so trails spiral inward
+        assert!(feedback_uv(vec2(0.5, 0.5), 0.0, 0.0).length() < vec2(0.5, 0.5).length());
     }
 
     #[test]

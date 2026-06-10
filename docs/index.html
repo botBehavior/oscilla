@@ -141,9 +141,9 @@ const status = document.getElementById("status");
 
 // ---------- patch: targets + smoothed currents (zipper-free) ----------
 const PARAMS = [
-  ["osc_mix", 0, 1, 0.35], ["fm_ratio", 0.5, 8, 2.0], ["fm_depth", 0, 6, 1.5],
-  ["cutoff_hz", 200, 12000, 4000], ["attack_s", 0.005, 1, 0.01], ["decay_s", 0.01, 1, 0.15],
-  ["sustain", 0, 1, 0.6], ["release_s", 0.01, 2, 0.25], ["gain", 0, 1, 0.5],
+  ["osc_mix", 0, 1, 0.25], ["fm_ratio", 0.5, 8, 2.0], ["fm_depth", 0, 6, 1.2],
+  ["cutoff_hz", 200, 12000, 3500], ["attack_s", 0.005, 1, 0.01], ["decay_s", 0.01, 1, 0.15],
+  ["sustain", 0, 1, 0.6], ["release_s", 0.01, 2, 0.25], ["gain", 0, 1, 0.4],
 ];
 const target = {}, cur = {};
 PARAMS.forEach(([n,,,d]) => { target[n] = d; cur[n] = d; });
@@ -321,11 +321,17 @@ async function initGpu() {
     entries: [{binding:0,resource:{buffer:aParams}},{binding:1,resource:{buffer:vBuf}},{binding:2,resource:{buffer:aOut}}] });
   const vParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const wave = device.createBuffer({ size: BLOCK * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const vOut = device.createBuffer({ size: VIS_W * VIS_H * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const vStage = device.createBuffer({ size: VIS_W * VIS_H * 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const vBind = device.createBindGroup({ layout: visual.getBindGroupLayout(0),
-    entries: [{binding:0,resource:{buffer:vParams}},{binding:1,resource:{buffer:wave}},{binding:2,resource:{buffer:vOut}}] });
-  G = { device, audio, visual, aParams, vBuf, aOut, aStage, aBind, vParams, wave, vOut, vStage, vBind };
+  const vsz = VIS_W * VIS_H * 12;
+  const vOutA = device.createBuffer({ size: vsz, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const vOutB = device.createBuffer({ size: vsz, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const vStage = device.createBuffer({ size: vsz, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const mkVBind = (pipe, prev, out) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0),
+    entries: [{binding:0,resource:{buffer:vParams}},{binding:1,resource:{buffer:wave}},
+              {binding:2,resource:{buffer:prev}},{binding:3,resource:{buffer:out}}] });
+  G = { device, audio, visual, aParams, vBuf, aOut, aStage, aBind, vParams, wave,
+        vOutA, vOutB, vStage, mkVBind,
+        vBindAB: mkVBind(visual, vOutA, vOutB), vBindBA: mkVBind(visual, vOutB, vOutA),
+        vEven: true };
   pollHotSwap();
   return G;
 }
@@ -348,8 +354,8 @@ async function pollHotSwap() {
           const audio = mk("synth_audio_cs"), visual = mk("synth_visual_cs");
           G.aBind = G.device.createBindGroup({ layout: audio.getBindGroupLayout(0),
             entries: [{binding:0,resource:{buffer:G.aParams}},{binding:1,resource:{buffer:G.vBuf}},{binding:2,resource:{buffer:G.aOut}}] });
-          G.vBind = G.device.createBindGroup({ layout: visual.getBindGroupLayout(0),
-            entries: [{binding:0,resource:{buffer:G.vParams}},{binding:1,resource:{buffer:G.wave}},{binding:2,resource:{buffer:G.vOut}}] });
+          G.vBindAB = G.mkVBind(visual, G.vOutA, G.vOutB);
+          G.vBindBA = G.mkVBind(visual, G.vOutB, G.vOutA);
           G.audio = audio; G.visual = visual;
           const latency = Date.now() - stamp;
           status.textContent = `⚡ hot-swapped — edit→sound ${latency} ms`;
@@ -433,11 +439,13 @@ async function drawFrame(level, waveOverride) {
   const tms = (performance.now() - tStart) | 0;
   g.device.queue.writeBuffer(g.vParams, 0, new Uint32Array([VIS_W, VIS_H, Math.min(999, level * 1000) | 0, tms]));
   g.device.queue.writeBuffer(g.wave, 0, (waveOverride ?? lastBlock.slice()).buffer);
+  const outBuf = g.vEven ? g.vOutB : g.vOutA;
   const enc = g.device.createCommandEncoder();
   const pass = enc.beginComputePass();
-  pass.setPipeline(g.visual); pass.setBindGroup(0, g.vBind);
+  pass.setPipeline(g.visual); pass.setBindGroup(0, g.vEven ? g.vBindAB : g.vBindBA);
   pass.dispatchWorkgroups(Math.ceil(VIS_W / 8), Math.ceil(VIS_H / 8)); pass.end();
-  enc.copyBufferToBuffer(g.vOut, 0, g.vStage, 0, VIS_W * VIS_H * 12);
+  g.vEven = !g.vEven;
+  enc.copyBufferToBuffer(outBuf, 0, g.vStage, 0, VIS_W * VIS_H * 12);
   g.device.queue.submit([enc.finish()]);
   await g.vStage.mapAsync(GPUMapMode.READ);
   const f = new Float32Array(g.vStage.getMappedRange());
@@ -452,16 +460,22 @@ async function drawFrame(level, waveOverride) {
 }
 
 // ---------- power + loops ----------
-let running = false, worklet = null, buffered = 0, underruns = 0;
+// Buffered-sample accounting is CLIENT-side and exact: sent counter minus
+// consumption derived from the AudioContext clock. (v1 trusted a stale
+// worklet report and overfilled the ring, lapping the read pointer — that
+// was the "horrible distortion".)
+let running = false, worklet = null, underruns = 0;
+let AC = null, audioT0 = 0, sentSamples = 0;
 document.getElementById("power-overlay").onclick = async () => {
   if (running) return;
   try {
     await initGpu();
-    const ac = new AudioContext({ sampleRate: SR });
-    await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
-    worklet = new AudioWorkletNode(ac, "oscilla-sink");
-    worklet.port.onmessage = (e) => { buffered = e.data.buffered; underruns = e.data.underruns; };
-    worklet.connect(ac.destination);
+    AC = new AudioContext({ sampleRate: SR });
+    await AC.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+    worklet = new AudioWorkletNode(AC, "oscilla-sink");
+    worklet.port.onmessage = (e) => { underruns = e.data.underruns; };
+    worklet.connect(AC.destination);
+    audioT0 = AC.currentTime;
     running = true;
     document.getElementById("power-overlay").remove();
     pump();
@@ -469,18 +483,23 @@ document.getElementById("power-overlay").onclick = async () => {
   } catch (e) { status.textContent = "error: " + e.message; console.error(e); }
 };
 
-const TARGET_BUFFER = 4096;
+const TARGET_BUFFER = 4096;  // ~85 ms latency
+const RING_CAP = 12288;      // hard cap well under the 16384 ring — never lap the reader
 async function pump() {
   while (running) {
-    let rendered = 0;
-    while (buffered + rendered * BLOCK < TARGET_BUFFER && rendered < 16) {
+    const consumed = Math.max(0, (AC.currentTime - audioT0) * SR);
+    let buffered = sentSamples - consumed;
+    let guard = 0;
+    while (buffered < TARGET_BUFFER && buffered < RING_CAP && guard < 24) {
       const block = await renderBlock();
       worklet.port.postMessage(block, [block.buffer]);
-      rendered++;
+      sentSamples += BLOCK;
+      buffered += BLOCK;
+      guard++;
     }
     const budget = (BLOCK / SR) * 1e6;
     status.textContent =
-      `${renderUs.toFixed(0)}µs/block (budget ${budget.toFixed(0)}) · ` +
+      `${renderUs.toFixed(0)}µs/block (budget ${budget.toFixed(0)}) · buf ${Math.round(buffered)} · ` +
       `${voices.filter(v=>v.active).length} voices · ${underruns} underruns · oct ${octave >= 0 ? "+" : ""}${octave}`;
     await new Promise(r => setTimeout(r, 8));
   }
@@ -515,13 +534,15 @@ if (isAuto) {
         for (let i = 0; i < VIS_W * VIS_H; i += 13) acc += d[i*4] + d[i*4+1] + d[i*4+2];
         return acc;
       };
-      await drawFrame(0.0, new Float32Array(BLOCK)); // silence
+      await drawFrame(0.0, new Float32Array(BLOCK)); // silence, empty trails
       const dark = brightness();
-      await drawFrame(0.8); // playing
-      const lit = brightness();
-      await beacon(`SYNTH2 ${ms.toFixed(2)} ms/block, rms ${Math.sqrt(sum/n).toFixed(3)}, peak ${peak.toFixed(3)}, brightness silent ${dark} vs playing ${lit} (${(lit/dark).toFixed(2)}x)`);
-    } catch (e) { await beacon("SYNTH2-ERROR " + e.message); }
-    await beacon("SYNTH2-DONE");
+      await drawFrame(0.8); // playing, frame 1
+      const lit1 = brightness();
+      await drawFrame(0.8); // playing, frame 2 — trails should accumulate
+      const lit2 = brightness();
+      await beacon(`SYNTH3 ${ms.toFixed(2)} ms/block, rms ${Math.sqrt(sum/n).toFixed(3)}, peak ${peak.toFixed(3)}, bright silent ${dark} / play ${lit1} / trails ${lit2} (react ${(lit1/dark).toFixed(2)}x, trail ${(lit2/lit1).toFixed(2)}x)`);
+    } catch (e) { await beacon("SYNTH3-ERROR " + e.message); }
+    await beacon("SYNTH3-DONE");
   })();
 }
 </script>
