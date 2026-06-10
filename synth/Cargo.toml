@@ -10,5 +10,9 @@ unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_arch, values("spir
 
 [target.'cfg(target_arch = "spirv")'.dependencies]
 spirv-std = "=0.10.0-alpha.1"
+gpu-shader-lib = { git = "https://github.com/botBehavior/rustgpu-bench" }
+glam = { version = ">=0.30.8, <0.31", default-features = false, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
+gpu-shader-lib = { git = "https://github.com/botBehavior/rustgpu-bench" }
+glam = { version = ">=0.30.8, <0.31", features = ["std"] }

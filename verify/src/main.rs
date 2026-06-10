@@ -74,8 +74,9 @@ fn main() {
     // ---- visual: pixel sanity vs CPU ----
     let (w, h) = (320u32, 180u32);
     let vis_pipe = pipeline(&device, &module, "synth_visual_cs", &[false, false, true]);
-    let vparams = storage(&device, &queue, bytemuck::cast_slice(&[w, h, 700u32, 0u32]));
+    let vparams = storage(&device, &queue, bytemuck::cast_slice(&[w, h, 700u32, 3200u32]));
     let wave: Vec<f32> = (0..BLOCK).map(|i| (i as f32 / 20.0).sin() * 0.8).collect();
+    let wave_arr: [f32; BLOCK as usize] = wave.clone().try_into().unwrap();
     let wave_buf = storage(&device, &queue, bytemuck::cast_slice(&wave));
     let vout = storage(&device, &queue, &vec![0u8; (w * h * 3 * 4) as usize]);
     let raw = dispatch_read(
@@ -86,13 +87,14 @@ fn main() {
     let px: &[f32] = bytemuck::cast_slice(&raw);
     let mut vworst = 0.0f32;
     for (x, y) in [(0u32, 0u32), (160, 90), (319, 179), (80, 40)] {
-        let uv_x = x as f32 / w as f32 * 2.0 - 1.0;
-        let uv_y = 1.0 - y as f32 / h as f32 * 2.0;
-        let wi = ((x as f32 / w as f32) * (BLOCK - 1) as f32) as usize;
-        let expect = oscilla_synth::visual_pixel(uv_x, uv_y, wave[wi], 0.7);
+        let uv = glam::vec2(
+            x as f32 / w as f32 * 2.0 - 1.0,
+            1.0 - y as f32 / h as f32 * 2.0,
+        );
+        let expect = oscilla_synth::visual_v2(uv, &wave_arr, 3.2, 0.7);
         let base = ((y * w + x) * 3) as usize;
-        for k in 0..3 {
-            vworst = vworst.max((px[base + k] - expect[k]).abs());
+        for (k, e) in [expect.x, expect.y, expect.z].into_iter().enumerate() {
+            vworst = vworst.max((px[base + k] - e).abs());
         }
     }
     println!("visual: worst sampled-pixel diff {vworst:.2e}: {}", if vworst < 1.0e-4 { "PASS" } else { "FAIL" });

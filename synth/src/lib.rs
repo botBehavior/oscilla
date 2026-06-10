@@ -208,19 +208,39 @@ pub fn spectrum_bin(wave: &[f32; BLOCK as usize], bin: u32, n_bins: u32) -> f32 
     (power.max(0.0)).sqrt() * (2.0 / BLOCK as f32)
 }
 
-// ---------- visual kernel (placeholder: level -> color ramp) ----------
+// ---------- visual engine v2: full-bleed audio-reactive composite ----------
 
-/// Day-zero visual: maps (uv.y vs recent waveform, level) to a color.
-/// Replaced by gpu-shader-lib composition in the page milestone.
-pub fn visual_pixel(uv_x: f32, uv_y: f32, wave_at_x: f32, level: f32) -> [f32; 3] {
-    let d = (uv_y - wave_at_x * 0.8).abs();
-    let line = (-60.0 * d).exp();
-    let glow = (-6.0 * d).exp() * level;
-    [
-        (0.9 * line + 0.8 * glow).min(1.0),
-        (0.5 * line + 0.3 * glow + 0.05 * uv_x.abs()).min(1.0),
-        (0.2 * line + 0.6 * glow).min(1.0),
-    ]
+use glam::{vec2, vec3, Vec2, Vec3};
+use gpu_shader_lib::{color, noise};
+
+/// The face of the instrument. Domain-warped FBM colored by an IQ palette,
+/// where bass swells the warp, mids tighten the field, highs spin the hue,
+/// the waveform burns through as a glowing line, and level drives bloom.
+/// Time-animated even in silence — the screen is never dead.
+pub fn visual_v2(uv: Vec2, wave: &[f32; BLOCK as usize], t: f32, level: f32) -> Vec3 {
+    let bass = spectrum_bin(wave, 5, 32);
+    let mid = spectrum_bin(wave, 16, 32);
+    let high = spectrum_bin(wave, 26, 32);
+
+    let warp = vec2(
+        noise::fbm2(uv * 2.0 + vec2(t * 0.05, -t * 0.04), 4, 11),
+        noise::fbm2(uv * 2.0 + vec2(-t * 0.03, t * 0.06) + vec2(3.7, 1.9), 4, 12),
+    );
+    let n = noise::fbm2(
+        uv * (2.2 + mid * 3.0) + warp * (0.8 + bass * 5.0) + vec2(t * 0.08, 0.0),
+        5,
+        7,
+    );
+    let base = color::palette_rainbow(n * 0.6 + t * 0.02 + high * 0.8);
+    let mut col = base * (0.12 + 0.5 * level + bass * 0.8);
+
+    // waveform burns through the field
+    let wi = ((uv.x * 0.5 + 0.5).clamp(0.0, 0.999) * (BLOCK - 1) as f32) as usize;
+    let d = (uv.y - wave[wi] * 0.7).abs();
+    col += vec3(0.9, 1.0, 0.95) * (-40.0 * d).exp() * (0.35 + level);
+    col += base * (-5.0 * d).exp() * level * 0.6;
+
+    color::srgb_encode(color::tonemap_aces(col))
 }
 
 #[cfg(test)]
@@ -323,6 +343,33 @@ mod tests {
         assert!(
             boundary_step <= max_step * 2.0 + 1e-4,
             "block boundary discontinuity: {boundary_step} vs max in-block {max_step}"
+        );
+    }
+
+    #[test]
+    fn visual_v2_finite_and_reactive() {
+        let mut loud = [0.0f32; BLOCK as usize];
+        for (i, w) in loud.iter_mut().enumerate() {
+            *w = sine(220.0, i as u32) * 0.8;
+        }
+        let silent = [0.0f32; BLOCK as usize];
+        let mut sum_loud = 0.0f32;
+        let mut sum_silent = 0.0f32;
+        for (x, y) in [(-0.7, -0.4), (0.0, 0.0), (0.5, 0.3), (0.9, -0.8)] {
+            let uv = vec2(x, y);
+            let cl = visual_v2(uv, &loud, 3.2, 0.7);
+            let cs = visual_v2(uv, &silent, 3.2, 0.0);
+            for c in [cl, cs] {
+                for ch in [c.x, c.y, c.z] {
+                    assert!(ch.is_finite() && (0.0..=1.0 + 1e-4).contains(&ch), "bad {ch}");
+                }
+            }
+            sum_loud += cl.x + cl.y + cl.z;
+            sum_silent += cs.x + cs.y + cs.z;
+        }
+        assert!(
+            sum_loud > sum_silent * 1.3,
+            "playing must be visibly brighter: {sum_loud} vs {sum_silent}"
         );
     }
 

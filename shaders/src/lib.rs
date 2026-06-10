@@ -7,9 +7,8 @@
 //! Visuals: fully parallel, reads the freshest audio block as a waveform.
 #![no_std]
 
-use oscilla_synth::{render_block, visual_pixel, Patch, Voice, BLOCK};
-use spirv_std::glam::UVec3;
-use spirv_std::num_traits::Float;
+use oscilla_synth::{render_block, visual_v2, Patch, Voice, BLOCK};
+use spirv_std::glam::{vec2, UVec3};
 use spirv_std::spirv;
 
 /// repr(C), u32/f32 only: patch + block meta + filter state in.
@@ -46,7 +45,7 @@ pub fn synth_audio_cs(
     out[BLOCK as usize] = state_out;
 }
 
-/// vparams = [width, height, level_milli, mode (0 = scope, 1 = spectrum)].
+/// vparams = [width, height, level_milli, time_ms].
 #[spirv(compute(threads(8, 8)))]
 pub fn synth_visual_cs(
     #[spirv(global_invocation_id)] id: UVec3,
@@ -59,24 +58,15 @@ pub fn synth_visual_cs(
     if id.x >= w || id.y >= h {
         return;
     }
-    let uv_x = id.x as f32 / w as f32 * 2.0 - 1.0;
-    let uv_y = 1.0 - id.y as f32 / h as f32 * 2.0;
+    let uv = vec2(
+        id.x as f32 / w as f32 * 2.0 - 1.0,
+        1.0 - id.y as f32 / h as f32 * 2.0,
+    );
     let level = vparams[2] as f32 * 1.0e-3;
-    let c = if vparams[3] == 1 {
-        // spectrum: 32 log-spaced bars, bar height = Goertzel magnitude
-        let n_bins = 32u32;
-        let bin = ((id.x as f32 / w as f32) * n_bins as f32) as u32;
-        let mag = oscilla_synth::spectrum_bin(wave, bin.min(n_bins - 1), n_bins);
-        let bar_h = (mag * 4.0).min(1.0) * 1.8 - 0.9; // map to uv space
-        let lit = if uv_y < bar_h { 1.0 } else { (-14.0 * (uv_y - bar_h)).exp() * 0.6 };
-        let hue = bin as f32 / n_bins as f32;
-        [lit * (0.3 + 0.7 * hue), lit * 0.9 * (1.0 - hue * 0.5), lit * (0.9 - 0.6 * hue)]
-    } else {
-        let wi = ((id.x as f32 / w as f32) * (BLOCK - 1) as f32) as usize;
-        visual_pixel(uv_x, uv_y, wave[wi], level)
-    };
+    let t = vparams[3] as f32 * 1.0e-3;
+    let c = visual_v2(uv, wave, t, level);
     let base = ((id.y * w + id.x) * 3) as usize;
-    out[base] = c[0];
-    out[base + 1] = c[1];
-    out[base + 2] = c[2];
+    out[base] = c.x;
+    out[base + 1] = c.y;
+    out[base + 2] = c.z;
 }

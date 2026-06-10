@@ -281,6 +281,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-shader-lib"
+version = "0.1.0"
+source = "git+https://github.com/botBehavior/rustgpu-bench#74df81d261f58d46ecc04d51f383f0982ab7ad09"
+dependencies = [
+ "glam",
+ "spirv-std",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -568,6 +577,8 @@ dependencies = [
 name = "oscilla-synth"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "gpu-shader-lib",
  "spirv-std",
 ]
 
@@ -576,6 +587,7 @@ name = "oscilla-verify"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam",
  "oscilla-synth",
  "pollster",
  "wgpu",

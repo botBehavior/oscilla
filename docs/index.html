@@ -2,45 +2,103 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>oscilla — the instrument is Rust source</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oscilla — play the GPU</title>
 <style>
-  body { font-family: ui-monospace, monospace; background: #0b0c10; color: #e8e8e8;
-         display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; }
-  canvas { border: 1px solid #333; width: min(94vw, 960px); image-rendering: auto; }
-  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
-  button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 1px solid #555;
-           background: #23252c; color: #e8e8e8; cursor: pointer; }
-  label { display: flex; gap: 5px; align-items: center; font-size: 11px; color: #9aa; }
-  input[type=range] { width: 84px; }
-  #status { min-height: 1.3em; font-size: 13px; }
-  .accent { color: #45e0a0; }
-  small { color: #778; max-width: 760px; text-align: center; }
-  kbd { background: #1b1d24; border: 1px solid #444; border-radius: 4px; padding: 1px 5px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000;
+               font-family: ui-monospace, monospace; color: #e8e8e8; }
+  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; gap: 14px;
+            align-items: center; padding: 8px 14px; font-size: 12px; color: #cfd6d2;
+            background: linear-gradient(#000a, #0000); z-index: 5; }
+  #topbar b { color: #45e0a0; font-size: 14px; }
+  #status { opacity: 0.85; }
+  #drawer-btn { margin-left: auto; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #3a4;
+           background: #10231bcc; color: #cfe; cursor: pointer; }
+  button:hover { background: #1a3a2bcc; }
+  /* power overlay */
+  #power-overlay { position: fixed; inset: 0; display: flex; flex-direction: column;
+                   align-items: center; justify-content: center; gap: 18px; z-index: 20;
+                   background: radial-gradient(ellipse at center, #0a1410, #000); cursor: pointer; }
+  #power-overlay h1 { font-size: 42px; margin: 0; letter-spacing: 2px; }
+  #power-overlay h1 span { color: #45e0a0; }
+  #power-overlay p { color: #8aa49a; max-width: 560px; text-align: center; line-height: 1.5; }
+  #power-overlay .big { font-size: 20px; padding: 14px 38px; border-width: 2px; }
+  /* XY pad */
+  #xy { position: fixed; right: 16px; bottom: 132px; width: 168px; height: 168px;
+        border: 1px solid #45e0a066; border-radius: 10px; background: #07120dcc;
+        z-index: 6; touch-action: none; cursor: crosshair; }
+  #xy .dot { position: absolute; width: 14px; height: 14px; border-radius: 50%;
+             background: #45e0a0; box-shadow: 0 0 14px #45e0a0; transform: translate(-50%, -50%);
+             pointer-events: none; }
+  #xy .lbl { position: absolute; font-size: 9px; color: #5a7; pointer-events: none; }
+  /* piano */
+  #piano { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+           display: flex; z-index: 6; height: 104px; touch-action: none; }
+  .wkey { width: 46px; height: 104px; background: #e8efe9ee; border: 1px solid #222;
+          border-radius: 0 0 6px 6px; position: relative; cursor: pointer; }
+  .wkey.on { background: #45e0a0; }
+  .bkey { width: 30px; height: 62px; background: #101512ee; border: 1px solid #000;
+          border-radius: 0 0 4px 4px; position: absolute; top: 0; z-index: 7; cursor: pointer; }
+  .bkey.on { background: #2a8a64; }
+  .klabel { position: absolute; bottom: 4px; width: 100%; text-align: center;
+            font-size: 10px; color: #333; pointer-events: none; }
+  .bkey .klabel { color: #9ab; }
+  #oct { position: fixed; left: 16px; bottom: 132px; z-index: 6; display: flex;
+         flex-direction: column; gap: 6px; }
+  /* drawer */
+  #drawer { position: fixed; top: 44px; right: 10px; width: 280px; z-index: 10;
+            background: #0a130ef0; border: 1px solid #2a4; border-radius: 10px;
+            padding: 12px; display: none; flex-direction: column; gap: 8px; }
+  #drawer.open { display: flex; }
+  #drawer label { display: flex; justify-content: space-between; gap: 8px;
+                  font-size: 11px; color: #9cb; align-items: center; }
+  #drawer input[type=range] { width: 150px; }
+  #drawer .row { display: flex; gap: 8px; }
+  #drawer .row button { flex: 1; font-size: 11px; padding: 5px; }
+  #midi { font-size: 10px; color: #687; }
 </style>
 </head>
 <body>
-<h3>oscilla<span class="accent">.</span> every sample you hear was computed by Rust on your GPU</h3>
-<small>
-  The synth engine (<a style="color:#45e0a0" href="https://github.com/botBehavior/oscilla">oscilla-synth</a>)
-  is unit-tested Rust — pitch proven by zero-crossing tests, envelope by monotonicity — compiled
-  to SPIR-V by rust-gpu, transpiled to WGSL, dispatched block-by-block via WebGPU into an
-  AudioWorklet. Play: <kbd>Z</kbd>–<kbd>M</kbd> white keys, <kbd>S</kbd><kbd>D</kbd> <kbd>G</kbd><kbd>H</kbd><kbd>J</kbd> black keys, <kbd>±</kbd> octave.
-</small>
-<div class="row">
-  <button id="power">power on</button>
-  <span id="status">off — click power (browsers require a gesture for audio)</span>
+<canvas id="canvas" width="640" height="360"></canvas>
+
+<div id="topbar">
+  <b>oscilla</b>
+  <span id="status">off</span>
+  <button id="drawer-btn">⚙ patch</button>
 </div>
-<div class="row" id="sliders"></div>
-<div class="row">
-  <button id="vismode">visual: scope</button>
-  <button id="record">record 5s WAV</button>
-  <button id="share">copy patch URL</button>
-  <span id="midi" style="font-size:11px;color:#778">midi: probing…</span>
+
+<div id="xy"><div class="dot" id="xydot"></div>
+  <span class="lbl" style="left:6px;bottom:4px">cutoff →</span>
+  <span class="lbl" style="left:4px;top:6px;writing-mode:vertical-rl">fm depth ↑</span>
 </div>
-<canvas id="canvas" width="480" height="270"></canvas>
+<div id="oct">
+  <button id="oct-up">oct +</button>
+  <button id="oct-down">oct −</button>
+</div>
+<div id="piano"></div>
+
+<div id="drawer">
+  <div id="sliders"></div>
+  <div class="row">
+    <button id="share">copy patch URL</button>
+    <button id="record">record 5s WAV</button>
+  </div>
+  <span id="midi">midi: probing…</span>
+</div>
+
+<div id="power-overlay">
+  <h1>oscilla<span>.</span></h1>
+  <p>Every sample you hear and every pixel you see is computed by unit-tested Rust
+     running on your GPU. Keys <b>Z–M</b> (or click the piano, or plug in MIDI),
+     drag the pad, open ⚙ for the full patch.</p>
+  <button class="big">▶ power on</button>
+  <p style="font-size:11px">a <a style="color:#45e0a0" href="https://github.com/botBehavior/oscilla">rust-gpu</a> instrument</p>
+</div>
 
 <script>
-// ---------- AudioWorklet processor (inline blob) ----------
 const WORKLET = `
 class OscillaSink extends AudioWorkletProcessor {
   constructor() {
@@ -74,141 +132,174 @@ registerProcessor("oscilla-sink", OscillaSink);
 </script>
 <script type="module">
 const BLOCK = 128, SR = 48000, VOICES = 8;
+const VIS_W = 640, VIS_H = 360;
 const isAuto = new URLSearchParams(location.search).has("auto");
 const beacon = (m) => fetch("/AUTO/" + encodeURIComponent(m)).catch(() => {});
-const VIS_W = 480, VIS_H = 270;
 const canvas = document.getElementById("canvas");
 const ctx2d = canvas.getContext("2d");
 const status = document.getElementById("status");
 
-// ---------- patch UI ----------
+// ---------- patch: targets + smoothed currents (zipper-free) ----------
 const PARAMS = [
   ["osc_mix", 0, 1, 0.35], ["fm_ratio", 0.5, 8, 2.0], ["fm_depth", 0, 6, 1.5],
   ["cutoff_hz", 200, 12000, 4000], ["attack_s", 0.005, 1, 0.01], ["decay_s", 0.01, 1, 0.15],
   ["sustain", 0, 1, 0.6], ["release_s", 0.01, 2, 0.25], ["gain", 0, 1, 0.5],
 ];
-const sliders = document.getElementById("sliders");
-const patchEls = {};
-for (const [name, min, max, def] of PARAMS) {
-  const l = document.createElement("label");
-  l.innerHTML = `${name} <input type="range" min="${min}" max="${max}" step="0.001" value="${def}" id="p_${name}">`;
-  sliders.appendChild(l);
-  patchEls[name] = () => +document.getElementById(`p_${name}`).value;
-}
-const patchF32 = () => new Float32Array([
-  ...PARAMS.map(([n]) => patchEls[n]()), 0, 0, 0, // 9 params + 3 pad = Patch(12 f32)
-]);
+const target = {}, cur = {};
+PARAMS.forEach(([n,,,d]) => { target[n] = d; cur[n] = d; });
+function smooth() { PARAMS.forEach(([n]) => cur[n] += (target[n] - cur[n]) * 0.18); }
+const patchF32 = () => new Float32Array([...PARAMS.map(([n]) => cur[n]), 0, 0, 0]);
 
-// ---------- shareable patch URLs (state in the fragment) ----------
-function loadPatchFromHash() {
-  if (!location.hash.startsWith("#p=")) return;
-  const vals = location.hash.slice(3).split(",").map(Number);
-  PARAMS.forEach(([n], i) => {
-    if (Number.isFinite(vals[i])) document.getElementById(`p_${n}`).value = vals[i];
+// drawer sliders bound to targets
+const sliders = document.getElementById("sliders");
+for (const [name, min, max] of PARAMS) {
+  const l = document.createElement("label");
+  l.innerHTML = `${name} <input type="range" min="${min}" max="${max}" step="0.001" value="${target[name]}" id="p_${name}">`;
+  sliders.appendChild(l);
+  document.getElementById(`p_${name}`).addEventListener("input", (e) => {
+    target[name] = +e.target.value;
+    syncHash();
   });
 }
-loadPatchFromHash();
-sliders.addEventListener("input", () => {
-  history.replaceState(null, "", "#p=" + PARAMS.map(([n]) => patchEls[n]().toFixed(3)).join(","));
-});
-document.getElementById("share").onclick = () => {
+function setParam(name, v) {
+  target[name] = v;
+  const el = document.getElementById(`p_${name}`);
+  if (el) el.value = v;
+  syncHash();
+}
+function syncHash() {
+  history.replaceState(null, "", "#p=" + PARAMS.map(([n]) => target[n].toFixed(3)).join(","));
+}
+if (location.hash.startsWith("#p=")) {
+  const vals = location.hash.slice(3).split(",").map(Number);
+  PARAMS.forEach(([n], i) => { if (Number.isFinite(vals[i])) setParam(n, vals[i]); });
+}
+document.getElementById("drawer-btn").onclick = () =>
+  document.getElementById("drawer").classList.toggle("open");
+document.getElementById("share").onclick = (e) => {
   navigator.clipboard?.writeText(location.href);
-  document.getElementById("share").textContent = "copied!";
-  setTimeout(() => document.getElementById("share").textContent = "copy patch URL", 1200);
+  e.target.textContent = "copied!";
+  setTimeout(() => e.target.textContent = "copy patch URL", 1200);
 };
 
-// ---------- visual mode toggle ----------
-let visMode = 0;
-document.getElementById("vismode").onclick = () => {
-  visMode = 1 - visMode;
-  document.getElementById("vismode").textContent = "visual: " + (visMode ? "spectrum" : "scope");
-};
-
-// ---------- WebMIDI ----------
-if (navigator.requestMIDIAccess) {
-  navigator.requestMIDIAccess().then((midi) => {
-    let n = 0;
-    const heldMidi = {};
-    for (const input of midi.inputs.values()) {
-      n++;
-      input.onmidimessage = (e) => {
-        const [st, note, vel] = e.data;
-        const cmd = st & 0xF0;
-        if (cmd === 0x90 && vel > 0) heldMidi[note] = noteOnFreq(440 * Math.pow(2, (note - 69) / 12));
-        else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
-          const slot = heldMidi[note];
-          if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldMidi[note]; }
-        }
-      };
-    }
-    document.getElementById("midi").textContent = n ? `midi: ${n} input(s) connected` : "midi: no devices";
-  }).catch(() => document.getElementById("midi").textContent = "midi: unavailable");
-} else {
-  document.getElementById("midi").textContent = "midi: unsupported";
+// ---------- XY pad: x = cutoff (log), y = fm depth ----------
+const xy = document.getElementById("xy");
+const xydot = document.getElementById("xydot");
+function xyTo(nx, ny) {
+  setParam("cutoff_hz", 200 * Math.pow(12000 / 200, nx));
+  setParam("fm_depth", ny * 6);
+  xydot.style.left = nx * 100 + "%";
+  xydot.style.top = (1 - ny) * 100 + "%";
 }
-
-// ---------- WAV export ----------
-let recording = null;
-document.getElementById("record").onclick = () => {
-  if (!running) { status.textContent = "power on first"; return; }
-  recording = { chunks: [], remaining: 5 * SR };
-  document.getElementById("record").textContent = "recording…";
+xyTo(0.73, 0.25);
+let xyDrag = false;
+const xyHandle = (e) => {
+  const r = xy.getBoundingClientRect();
+  xyTo(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+       Math.min(1, Math.max(0, 1 - (e.clientY - r.top) / r.height)));
 };
-function finishRecording() {
-  const total = recording.chunks.reduce((a, c) => a + c.length, 0);
-  const pcm = new Int16Array(total);
-  let o = 0;
-  for (const c of recording.chunks) for (const v of c) pcm[o++] = Math.max(-1, Math.min(1, v)) * 32767;
-  const hdr = new ArrayBuffer(44);
-  const dv = new DataView(hdr);
-  const su32 = (off, v) => dv.setUint32(off, v, true);
-  const su16 = (off, v) => dv.setUint16(off, v, true);
-  su32(0, 0x46464952); su32(4, 36 + pcm.byteLength); su32(8, 0x45564157);
-  su32(12, 0x20746d66); su32(16, 16); su16(20, 1); su16(22, 1);
-  su32(24, SR); su32(28, SR * 2); su16(32, 2); su16(34, 16);
-  su32(36, 0x61746164); su32(40, pcm.byteLength);
-  const blob = new Blob([hdr, pcm.buffer], { type: "audio/wav" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "oscilla.wav";
-  a.click();
-  recording = null;
-  document.getElementById("record").textContent = "record 5s WAV";
-}
+xy.addEventListener("pointerdown", (e) => { xyDrag = true; xy.setPointerCapture(e.pointerId); xyHandle(e); });
+xy.addEventListener("pointermove", (e) => xyDrag && xyHandle(e));
+xy.addEventListener("pointerup", () => xyDrag = false);
 
-// ---------- voices (gate stamps in absolute samples) ----------
+// ---------- voices ----------
 const voices = Array.from({ length: VOICES }, () => ({ freq: 0, on: 0, off: 0, active: 0 }));
-let sampleCursor = 0; // next sample to be rendered
+let sampleCursor = 0;
 let octave = 0;
-const KEYMAP = { z:0, s:1, x:2, d:3, c:4, v:5, g:6, b:7, h:8, n:9, j:10, m:11, q:12 };
-const held = {};
 function noteOnFreq(freq) {
   let slot = voices.findIndex(v => !v.active);
-  if (slot < 0) slot = 0; // steal
+  if (slot < 0) slot = 0;
   voices[slot] = { freq, on: sampleCursor, off: 0xFFFFFFFF, active: 1 };
   return slot;
 }
-function noteOn(semi) {
-  return noteOnFreq(261.63 * Math.pow(2, (semi + 12 * octave) / 12));
-}
-window.addEventListener("keydown", (e) => {
-  if (e.repeat) return;
-  if (e.key === "+" || e.key === "=") { octave = Math.min(octave + 1, 3); return; }
-  if (e.key === "-") { octave = Math.max(octave - 1, -2); return; }
-  const semi = KEYMAP[e.key.toLowerCase()];
-  if (semi !== undefined && !(e.key in held)) held[e.key] = noteOn(semi);
-});
-window.addEventListener("keyup", (e) => {
-  const slot = held[e.key];
-  if (slot !== undefined) { voices[slot].off = sampleCursor; delete held[e.key]; }
-});
-
+const semiFreq = (semi) => 261.63 * Math.pow(2, (semi + 12 * octave) / 12);
 const voicesF32 = () => {
   const buf = new ArrayBuffer(VOICES * 16);
   const f = new Float32Array(buf), u = new Uint32Array(buf);
   voices.forEach((v, i) => { f[i*4] = v.freq; u[i*4+1] = v.on; u[i*4+2] = v.off; u[i*4+3] = v.active; });
   return buf;
 };
+
+// ---------- on-screen piano + computer keys ----------
+const piano = document.getElementById("piano");
+const NOTES = [
+  { semi: 0, key: "z" }, { semi: 2, key: "x" }, { semi: 4, key: "c" }, { semi: 5, key: "v" },
+  { semi: 7, key: "b" }, { semi: 9, key: "n" }, { semi: 11, key: "m" }, { semi: 12, key: "q" },
+];
+const BLACKS = [
+  { semi: 1, key: "s", after: 0 }, { semi: 3, key: "d", after: 1 },
+  { semi: 6, key: "g", after: 3 }, { semi: 8, key: "h", after: 4 }, { semi: 10, key: "j", after: 5 },
+];
+const keyEls = {};
+const heldSlots = {};
+function pressNote(id, semi) {
+  if (heldSlots[id] !== undefined) return;
+  heldSlots[id] = noteOnFreq(semiFreq(semi));
+  keyEls[semi]?.classList.add("on");
+}
+function releaseNote(id, semi) {
+  const slot = heldSlots[id];
+  if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldSlots[id]; }
+  keyEls[semi]?.classList.remove("on");
+}
+NOTES.forEach(({ semi, key }, wi) => {
+  const k = document.createElement("div");
+  k.className = "wkey";
+  k.innerHTML = `<span class="klabel">${key.toUpperCase()}</span>`;
+  k.addEventListener("pointerdown", (e) => { k.setPointerCapture(e.pointerId); pressNote("p" + semi, semi); });
+  k.addEventListener("pointerup", () => releaseNote("p" + semi, semi));
+  k.addEventListener("pointerleave", () => releaseNote("p" + semi, semi));
+  piano.appendChild(k);
+  keyEls[semi] = k;
+  const black = BLACKS.find(b => b.after === wi);
+  if (black) {
+    const bk = document.createElement("div");
+    bk.className = "bkey";
+    bk.style.left = (wi + 1) * 46 - 15 + "px";
+    bk.innerHTML = `<span class="klabel">${black.key.toUpperCase()}</span>`;
+    bk.addEventListener("pointerdown", (e) => { e.stopPropagation(); bk.setPointerCapture(e.pointerId); pressNote("p" + black.semi, black.semi); });
+    bk.addEventListener("pointerup", () => releaseNote("p" + black.semi, black.semi));
+    bk.addEventListener("pointerleave", () => releaseNote("p" + black.semi, black.semi));
+    piano.appendChild(bk);
+    keyEls[black.semi] = bk;
+  }
+});
+const KEYMAP = {};
+[...NOTES, ...BLACKS].forEach(({ semi, key }) => KEYMAP[key] = semi);
+window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  if (e.key === "+" || e.key === "=") { octave = Math.min(octave + 1, 3); return; }
+  if (e.key === "-") { octave = Math.max(octave - 1, -2); return; }
+  const semi = KEYMAP[e.key.toLowerCase()];
+  if (semi !== undefined) pressNote("k" + e.key, semi);
+});
+window.addEventListener("keyup", (e) => {
+  const semi = KEYMAP[e.key.toLowerCase()];
+  if (semi !== undefined) releaseNote("k" + e.key, semi);
+});
+document.getElementById("oct-up").onclick = () => octave = Math.min(octave + 1, 3);
+document.getElementById("oct-down").onclick = () => octave = Math.max(octave - 1, -2);
+
+// ---------- WebMIDI ----------
+if (navigator.requestMIDIAccess) {
+  navigator.requestMIDIAccess().then((midi) => {
+    let n = 0;
+    for (const input of midi.inputs.values()) {
+      n++;
+      input.onmidimessage = (e) => {
+        const [st, note, vel] = e.data;
+        const cmd = st & 0xF0;
+        if (cmd === 0x90 && vel > 0) {
+          heldSlots["m" + note] = noteOnFreq(440 * Math.pow(2, (note - 69) / 12));
+        } else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
+          const slot = heldSlots["m" + note];
+          if (slot !== undefined) { voices[slot].off = sampleCursor; delete heldSlots["m" + note]; }
+        }
+      };
+    }
+    document.getElementById("midi").textContent = n ? `midi: ${n} input(s)` : "midi: no devices";
+  }).catch(() => document.getElementById("midi").textContent = "midi: unavailable");
+} else { document.getElementById("midi").textContent = "midi: unsupported"; }
 
 // ---------- GPU ----------
 let G = null;
@@ -239,8 +330,7 @@ async function initGpu() {
   return G;
 }
 
-// ---------- live-coding hot swap: poll the version stamp, rebuild pipelines,
-// swap between blocks; the audio ring keeps playing throughout ----------
+// ---------- live-coding hot swap ----------
 let kernelVersion = null;
 async function pollHotSwap() {
   for (;;) {
@@ -248,37 +338,38 @@ async function pollHotSwap() {
       const r = await fetch("./kernels.version", { cache: "no-store" });
       if (r.ok) {
         const txt = (await r.text()).trim();
-        if (kernelVersion === null) {
-          kernelVersion = txt;
-        } else if (txt !== kernelVersion) {
+        if (kernelVersion === null) kernelVersion = txt;
+        else if (txt !== kernelVersion) {
           kernelVersion = txt;
           const stamp = +txt.split(/\s+/)[1];
           const code = await (await fetch("./kernels.wgsl", { cache: "no-store" })).text();
           const module = G.device.createShaderModule({ code });
           const mk = (entryPoint) => G.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
           const audio = mk("synth_audio_cs"), visual = mk("synth_visual_cs");
-          // new layouts => new bind groups; swap everything atomically
           G.aBind = G.device.createBindGroup({ layout: audio.getBindGroupLayout(0),
             entries: [{binding:0,resource:{buffer:G.aParams}},{binding:1,resource:{buffer:G.vBuf}},{binding:2,resource:{buffer:G.aOut}}] });
           G.vBind = G.device.createBindGroup({ layout: visual.getBindGroupLayout(0),
             entries: [{binding:0,resource:{buffer:G.vParams}},{binding:1,resource:{buffer:G.wave}},{binding:2,resource:{buffer:G.vOut}}] });
           G.audio = audio; G.visual = visual;
           const latency = Date.now() - stamp;
-          status.textContent = `⚡ hot-swapped kernels — edit→sound ${latency} ms`;
+          status.textContent = `⚡ hot-swapped — edit→sound ${latency} ms`;
           if (isAuto) beacon(`SWAP edit-to-sound ${latency}ms`);
         }
       }
-    } catch (e) { /* version file may not exist yet; fine */ }
+    } catch (e) {}
     await new Promise(r => setTimeout(r, 700));
   }
 }
 
+// ---------- audio rendering ----------
 let filterState = 0;
 let lastBlock = new Float32Array(BLOCK);
 let renderUs = 0;
+let recording = null;
 
 async function renderBlock() {
   const g = G;
+  smooth();
   const pbuf = new ArrayBuffer(64);
   new Float32Array(pbuf, 0, 12).set(patchF32());
   const u = new Uint32Array(pbuf, 48, 4);
@@ -307,12 +398,41 @@ async function renderBlock() {
   return data.slice(0, BLOCK);
 }
 
-// ---------- visual loop ----------
+// ---------- WAV export (tucked in the drawer) ----------
+document.getElementById("record").onclick = (e) => {
+  if (!running) { status.textContent = "power on first"; return; }
+  recording = { chunks: [], remaining: 5 * SR };
+  e.target.textContent = "recording…";
+};
+function finishRecording() {
+  const total = recording.chunks.reduce((a, c) => a + c.length, 0);
+  const pcm = new Int16Array(total);
+  let o = 0;
+  for (const c of recording.chunks) for (const v of c) pcm[o++] = Math.max(-1, Math.min(1, v)) * 32767;
+  const hdr = new ArrayBuffer(44);
+  const dv = new DataView(hdr);
+  dv.setUint32(0, 0x46464952, true); dv.setUint32(4, 36 + pcm.byteLength, true);
+  dv.setUint32(8, 0x45564157, true); dv.setUint32(12, 0x20746d66, true);
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, SR, true); dv.setUint32(28, SR * 2, true);
+  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  dv.setUint32(36, 0x61746164, true); dv.setUint32(40, pcm.byteLength, true);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([hdr, pcm.buffer], { type: "audio/wav" }));
+  a.download = "oscilla.wav";
+  a.click();
+  recording = null;
+  document.getElementById("record").textContent = "record 5s WAV";
+}
+
+// ---------- visuals ----------
 const img = ctx2d.createImageData(VIS_W, VIS_H);
-async function drawFrame(level) {
+const tStart = performance.now();
+async function drawFrame(level, waveOverride) {
   const g = G;
-  g.device.queue.writeBuffer(g.vParams, 0, new Uint32Array([VIS_W, VIS_H, Math.min(999, level * 1000) | 0, visMode]));
-  g.device.queue.writeBuffer(g.wave, 0, lastBlock.slice().buffer);
+  const tms = (performance.now() - tStart) | 0;
+  g.device.queue.writeBuffer(g.vParams, 0, new Uint32Array([VIS_W, VIS_H, Math.min(999, level * 1000) | 0, tms]));
+  g.device.queue.writeBuffer(g.wave, 0, (waveOverride ?? lastBlock.slice()).buffer);
   const enc = g.device.createCommandEncoder();
   const pass = enc.beginComputePass();
   pass.setPipeline(g.visual); pass.setBindGroup(0, g.vBind);
@@ -331,26 +451,25 @@ async function drawFrame(level) {
   ctx2d.putImageData(img, 0, 0);
 }
 
-// ---------- power on: audio graph + pump ----------
+// ---------- power + loops ----------
 let running = false, worklet = null, buffered = 0, underruns = 0;
-document.getElementById("power").onclick = async () => {
+document.getElementById("power-overlay").onclick = async () => {
   if (running) return;
   try {
     await initGpu();
     const ac = new AudioContext({ sampleRate: SR });
-    const blobUrl = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
-    await ac.audioWorklet.addModule(blobUrl);
+    await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
     worklet = new AudioWorkletNode(ac, "oscilla-sink");
     worklet.port.onmessage = (e) => { buffered = e.data.buffered; underruns = e.data.underruns; };
     worklet.connect(ac.destination);
     running = true;
+    document.getElementById("power-overlay").remove();
     pump();
     visLoop();
-    document.getElementById("power").textContent = "running";
   } catch (e) { status.textContent = "error: " + e.message; console.error(e); }
 };
 
-const TARGET_BUFFER = 4096; // ~85 ms of headroom
+const TARGET_BUFFER = 4096;
 async function pump() {
   while (running) {
     let rendered = 0;
@@ -358,36 +477,31 @@ async function pump() {
       const block = await renderBlock();
       worklet.port.postMessage(block, [block.buffer]);
       rendered++;
-      buffered += 0; // worklet reports the truth periodically
     }
     const budget = (BLOCK / SR) * 1e6;
-    const margin = (1 - renderUs / budget) * 100;
     status.textContent =
-      `block ${renderUs.toFixed(0)} µs / budget ${budget.toFixed(0)} µs (${margin.toFixed(0)}% margin) · ` +
-      `buffered ${buffered} smp · underruns ${underruns} · voices ${voices.filter(v=>v.active).length}`;
+      `${renderUs.toFixed(0)}µs/block (budget ${budget.toFixed(0)}) · ` +
+      `${voices.filter(v=>v.active).length} voices · ${underruns} underruns · oct ${octave >= 0 ? "+" : ""}${octave}`;
     await new Promise(r => setTimeout(r, 8));
   }
 }
 
-let visLevel = 0;
 async function visLoop() {
   while (running) {
     let rms = 0;
     for (let i = 0; i < BLOCK; i++) rms += lastBlock[i] * lastBlock[i];
-    visLevel = Math.sqrt(rms / BLOCK) * 3;
-    await drawFrame(visLevel);
+    await drawFrame(Math.sqrt(rms / BLOCK) * 3);
     await new Promise(requestAnimationFrame);
   }
 }
 
-// ---------- headless verification (?auto): compute path only, no audio ----------
+// ---------- headless verification: reactivity is the gate ----------
 if (isAuto) {
   (async () => {
     try {
       await initGpu();
-      // synthesize 2 notes, render 20 blocks, report stats
       voices[0] = { freq: 220, on: 0, off: 0xFFFFFFFF, active: 1 };
-      voices[1] = { freq: 330, on: 256, off: 1800, active: 1 };
+      voices[1] = { freq: 330, on: 256, off: 0xFFFFFFFF, active: 1 };
       let peak = 0, sum = 0, n = 0;
       const t0 = performance.now();
       for (let b = 0; b < 20; b++) {
@@ -395,16 +509,19 @@ if (isAuto) {
         for (const v of block) { peak = Math.max(peak, Math.abs(v)); sum += v * v; n++; }
       }
       const ms = (performance.now() - t0) / 20;
-      const rms = Math.sqrt(sum / n);
-      await drawFrame(0.7);
-      const d = ctx2d.getImageData(240, 135, 1, 1).data;
-      visMode = 1;
-      await drawFrame(0.7);
-      const s = ctx2d.getImageData(60, 240, 1, 1).data; // low-freq bar region
-      visMode = 0;
-      await beacon(`SYNTH blocks 20, ${ms.toFixed(2)} ms/block, rms ${rms.toFixed(3)}, peak ${peak.toFixed(3)}, vispx ${d[0]},${d[1]},${d[2]}, spectrumpx ${s[0]},${s[1]},${s[2]}`);
-    } catch (e) { await beacon("SYNTH-ERROR " + e.message); }
-    await beacon("SYNTH-DONE");
+      const brightness = () => {
+        const d = ctx2d.getImageData(0, 0, VIS_W, VIS_H).data;
+        let acc = 0;
+        for (let i = 0; i < VIS_W * VIS_H; i += 13) acc += d[i*4] + d[i*4+1] + d[i*4+2];
+        return acc;
+      };
+      await drawFrame(0.0, new Float32Array(BLOCK)); // silence
+      const dark = brightness();
+      await drawFrame(0.8); // playing
+      const lit = brightness();
+      await beacon(`SYNTH2 ${ms.toFixed(2)} ms/block, rms ${Math.sqrt(sum/n).toFixed(3)}, peak ${peak.toFixed(3)}, brightness silent ${dark} vs playing ${lit} (${(lit/dark).toFixed(2)}x)`);
+    } catch (e) { await beacon("SYNTH2-ERROR " + e.message); }
+    await beacon("SYNTH2-DONE");
   })();
 }
 </script>
